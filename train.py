@@ -1,0 +1,231 @@
+from functools import partial
+from typing import List, Optional, Tuple
+
+import torch
+from torch.optim import AdamW
+from torch.utils.data import DataLoader, Dataset
+from transformers import get_linear_schedule_with_warmup
+
+from data import load_gsm8k_rl_problems, load_gsm8k_sft_data
+from planner import Planner
+from rewards import planner_reward
+from task_graph import TaskGraph
+
+
+class SFTDataset(Dataset):
+    def __init__(self, data: List[Tuple[str, TaskGraph]], planner: Planner, max_length: int = 512):
+        self.samples = []
+        for problem, graph in data:
+            prompt = planner.build_prompt(problem)
+            target = graph.to_json() + planner.tokenizer.eos_token
+            self.samples.append(prompt + target)
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        return self.samples[idx]
+
+
+def sft_collate(batch: List[str], tokenizer, max_length: int) -> dict:
+    encodings = tokenizer(
+        batch,
+        return_tensors="pt",
+        padding=True,
+        truncation=True,
+        max_length=max_length,
+    )
+    encodings["labels"] = encodings["input_ids"].clone()
+    return encodings
+
+
+def validate_sft(planner: Planner, val_problems: List[str], num_samples: int = 50) -> Tuple[float, float]:
+    problems = val_problems[:num_samples]
+    parsed = 0
+    valid_dag = 0
+
+    planner.model.eval()
+    for problem in problems:
+        try:
+            graph = planner.generate(problem, temperature=0.0)
+            parsed += 1
+            if graph.is_valid():
+                valid_dag += 1
+        except Exception:
+            pass
+
+    parse_rate = parsed / len(problems)
+    validity_rate = valid_dag / len(problems)
+    return parse_rate, validity_rate
+
+
+def run_sft(
+    planner: Planner,
+    max_samples: int = 1000,
+    epochs: int = 10,
+    batch_size: int = 1,
+    lr: float = 2e-5,
+    max_length: int = 512,
+    parse_rate_threshold: float = 0.90,
+    validity_rate_threshold: float = 0.90,
+):
+    all_data = load_gsm8k_sft_data(max_samples=max_samples + 100)
+    train_data = all_data[:max_samples]
+    val_problems = [problem for problem, _ in all_data[max_samples:max_samples + 100]]
+
+    dataset = SFTDataset(train_data, planner, max_length)
+    collate_fn = partial(sft_collate, tokenizer=planner.tokenizer, max_length=max_length)
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
+
+    optimizer = AdamW(planner.model.parameters(), lr=lr)
+    total_steps = len(dataloader) * epochs
+    scheduler = get_linear_schedule_with_warmup(
+        optimizer, num_warmup_steps=total_steps // 10, num_training_steps=total_steps
+    )
+
+    for epoch in range(epochs):
+        planner.model.train()
+        total_loss = 0.0
+        for step, batch in enumerate(dataloader):
+            batch = {k: v.to(planner.device) for k, v in batch.items()}
+            outputs = planner.model(**batch)
+            loss = outputs.loss
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(planner.model.parameters(), 1.0)
+            optimizer.step()
+            scheduler.step()
+            optimizer.zero_grad()
+            total_loss += loss.item()
+            if step % 50 == 0:
+                print(f"  [SFT] Epoch {epoch+1}, Step {step}, Loss: {loss.item():.4f}")
+
+        avg_loss = total_loss / len(dataloader)
+        parse_rate, validity_rate = validate_sft(planner, val_problems)
+        print(f"  [SFT] Epoch {epoch+1} done. Avg loss: {avg_loss:.4f} | Parse rate: {parse_rate:.2%} | DAG validity: {validity_rate:.2%}")
+
+        if parse_rate >= parse_rate_threshold and validity_rate >= validity_rate_threshold:
+            print(f"  [SFT] Early stopping: both thresholds reached at epoch {epoch+1}.")
+            break
+
+
+def compute_grpo_loss(
+    planner: Planner,
+    problem: str,
+    graphs: List[Optional[TaskGraph]],
+    rewards: List[float],
+) -> torch.Tensor:
+    valid_pairs = [(g, r) for g, r in zip(graphs, rewards) if g is not None]
+    if not valid_pairs:
+        return torch.tensor(0.0, device=planner.device, requires_grad=False)
+
+    valid_graphs, valid_rewards = zip(*valid_pairs)
+    reward_tensor = torch.tensor(valid_rewards, dtype=torch.float32)
+    advantages = (reward_tensor - reward_tensor.mean()) / (reward_tensor.std() + 1e-8)
+
+    prompt = planner.build_prompt(problem)
+    prompt_len = len(planner.tokenizer(prompt, return_tensors="pt")["input_ids"][0])
+
+    total_loss = torch.zeros(1, device=planner.device, requires_grad=True)
+
+    for graph, advantage in zip(valid_graphs, advantages):
+        target = graph.to_json() + planner.tokenizer.eos_token
+        inputs = planner.tokenizer(
+            prompt + target,
+            return_tensors="pt",
+            truncation=True,
+            max_length=1024,
+        ).to(planner.device)
+
+        labels = inputs["input_ids"].clone()
+        labels[0, :prompt_len] = -100
+
+        outputs = planner.model(input_ids=inputs["input_ids"], labels=labels)
+        log_prob = -outputs.loss
+        total_loss = total_loss + (-advantage.to(planner.device) * log_prob)
+
+    return total_loss / len(valid_pairs)
+
+
+def run_grpo(
+    planner: Planner,
+    max_problems: int = 500,
+    epochs: int = 2,
+    G: int = 8,
+    lr: float = 1e-5,
+):
+    problems = load_gsm8k_rl_problems(max_samples=max_problems)
+    optimizer = AdamW(planner.model.parameters(), lr=lr)
+
+    for epoch in range(epochs):
+        total_reward = 0.0
+        count = 0
+        for i, problem_dict in enumerate(problems):
+            question = problem_dict["question"]
+            ground_truth = problem_dict["answer"]
+
+            graphs = planner.generate_batch(question, G=G)
+            rewards = [
+                planner_reward(g, ground_truth=ground_truth)
+                if g is not None and g.is_valid()
+                else 0.0
+                for g in graphs
+            ]
+
+            planner.model.train()
+            loss = compute_grpo_loss(planner, question, graphs, rewards)
+
+            if loss.requires_grad:
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(planner.model.parameters(), 1.0)
+                optimizer.step()
+                optimizer.zero_grad()
+
+            total_reward += sum(rewards) / len(rewards)
+            count += 1
+
+            if i % 20 == 0:
+                print(f"  [GRPO] Epoch {epoch+1}, Problem {i+1}/{len(problems)}, Avg reward: {total_reward/count:.4f}")
+
+        print(f"  [GRPO] Epoch {epoch+1} done. Mean reward: {total_reward/count:.4f}")
+
+
+def train(
+    model_name: str = "Qwen/Qwen2.5-0.5B-Instruct",
+    save_path: str = "./planner_model",
+    sft_samples: int = 1000,
+    rl_problems: int = 500,
+    gradient_checkpointing: bool = True,
+    device: str = "cpu",
+):
+    print(f"Loading base model: {model_name} on {device}")
+    planner = Planner(model_name=model_name, gradient_checkpointing=gradient_checkpointing, device=device)
+
+    print("\nStage 1: SFT warm-up on GSM8K chain-of-thought...")
+    run_sft(planner, max_samples=sft_samples)
+
+    # Stage 2 (GRPO) requires the Executor and Discriminator to be implemented first.
+    # print("\nStage 2: GRPO reinforcement learning...")
+    # run_grpo(planner, max_problems=rl_problems)
+
+    planner.save(save_path)
+    print(f"\nModel saved to {save_path}")
+
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model_name", type=str, default="Qwen/Qwen2.5-0.5B-Instruct")
+    parser.add_argument("--save_path", type=str, default="./planner_model")
+    parser.add_argument("--sft_samples", type=int, default=1000)
+    parser.add_argument("--rl_problems", type=int, default=500)
+    parser.add_argument("--gradient_checkpointing", type=lambda x: x.lower() != "false", default=True)
+    parser.add_argument("--device", type=str, default="cpu")
+    args = parser.parse_args()
+    train(
+        model_name=args.model_name,
+        save_path=args.save_path,
+        sft_samples=args.sft_samples,
+        rl_problems=args.rl_problems,
+        gradient_checkpointing=args.gradient_checkpointing,
+        device=args.device,
+    )

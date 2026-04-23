@@ -1,0 +1,29 @@
+# trained model weights
+planner_model/
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# virtual environments
+venv/
+.env/
+
+# jupyter
+.ipynb_checkpoints/
+
+# slurm logs
+logs/
+
+# huggingface cache
+.cache/
+
+# os
+.DS_Store
+
+# pdfs (papers)
+*.pdf
