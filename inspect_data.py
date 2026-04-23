@@ -1,5 +1,5 @@
 from datasets import load_dataset
-from data import parse_gsm8k_steps, steps_to_linear_dag, load_gsm8k_sft_data
+from data import parse_socratic_steps, steps_to_linear_dag, load_gsm8k_sft_data
 from planner import Planner
 from task_graph import TaskGraph
 import torch
@@ -13,14 +13,14 @@ def inspect_data(n: int = 3):
     print("SECTION 1: RAW GSM8K SAMPLES")
     print(DIVIDER)
 
-    dataset = load_dataset("openai/gsm8k", "main", split="train")
+    dataset = load_dataset("openai/gsm8k", "socratic", split="train")
     for i, example in enumerate(dataset):
         if i >= n:
             break
         print(f"\n--- Sample {i+1} ---")
         print(f"Question:\n  {example['question']}")
         print(f"\nRaw solution:\n  {example['answer']}")
-        steps = parse_gsm8k_steps(example["answer"])
+        steps = parse_socratic_steps(example["answer"])
         print(f"\nParsed steps ({len(steps)}):")
         for j, step in enumerate(steps):
             print(f"  Step {j+1}: {step}")
@@ -36,7 +36,7 @@ def inspect_prompt(n: int = 1):
     print(DIVIDER)
 
     data = load_gsm8k_sft_data(max_samples=n)
-    planner = Planner(gradient_checkpointing=False)
+    planner = Planner()
 
     for i, (problem, graph) in enumerate(data):
         print(f"\n--- Sample {i+1} ---")
@@ -51,7 +51,7 @@ def inspect_model_output(n: int = 2):
     print(DIVIDER)
 
     data = load_gsm8k_sft_data(max_samples=n)
-    planner = Planner(gradient_checkpointing=False)
+    planner = Planner()
     planner.model.eval()
 
     for i, (problem, expected_graph) in enumerate(data):

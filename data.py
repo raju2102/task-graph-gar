@@ -6,17 +6,19 @@ from datasets import load_dataset
 from task_graph import TaskGraph, TaskNode
 
 
-def parse_gsm8k_steps(solution: str) -> List[str]:
+def parse_socratic_steps(solution: str) -> List[str]:
     lines = [l.strip() for l in solution.split("\n") if l.strip()]
     steps = []
     for line in lines:
         if line.startswith("####"):
             continue
-        cleaned = re.sub(r"^(Step\s*\d+[:.)]?\s*|\d+[:.]\s*)", "", line).strip()
-        cleaned = re.sub(r"<<[^>]*>>", "", cleaned).strip()
-        if cleaned and len(cleaned) > 5:
-            steps.append(cleaned)
-    return steps if steps else [solution.strip()]
+        if "**" in line:
+            question = line.split("**")[0].strip()
+        else:
+            question = line.strip()
+        if question and len(question) > 5:
+            steps.append(question)
+    return steps if steps else []
 
 
 def steps_to_linear_dag(steps: List[str]) -> TaskGraph:
@@ -35,12 +37,12 @@ def extract_answer(solution: str) -> Optional[str]:
 def load_gsm8k_sft_data(
     split: str = "train", max_samples: int = 1000
 ) -> List[Tuple[str, TaskGraph]]:
-    dataset = load_dataset("openai/gsm8k", "main", split=split)
+    dataset = load_dataset("openai/gsm8k", "socratic", split=split)
     data = []
     for i, example in enumerate(dataset):
         if i >= max_samples:
             break
-        steps = parse_gsm8k_steps(example["answer"])
+        steps = parse_socratic_steps(example["answer"])
         if len(steps) >= 2:
             graph = steps_to_linear_dag(steps)
             data.append((example["question"], graph))
