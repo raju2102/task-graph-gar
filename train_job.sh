@@ -25,5 +25,6 @@ python train.py \
     --model_name "Qwen/Qwen2.5-1.5B-Instruct" \
     --device cuda \
     --gradient_checkpointing False \
-    --sft_samples 1000
+    --sft_samples 1000 \
+    --batch_size 8
 echo "Done!"

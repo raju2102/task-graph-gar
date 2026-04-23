@@ -196,12 +196,13 @@ def train(
     rl_problems: int = 500,
     gradient_checkpointing: bool = True,
     device: str = "cpu",
+    batch_size: int = 1,
 ):
     print(f"Loading base model: {model_name} on {device}")
     planner = Planner(model_name=model_name, gradient_checkpointing=gradient_checkpointing, device=device)
 
     print("\nStage 1: SFT warm-up on GSM8K chain-of-thought...")
-    run_sft(planner, max_samples=sft_samples)
+    run_sft(planner, max_samples=sft_samples, batch_size=batch_size)
 
     # Stage 2 (GRPO) requires the Executor and Discriminator to be implemented first.
     # print("\nStage 2: GRPO reinforcement learning...")
@@ -220,6 +221,7 @@ if __name__ == "__main__":
     parser.add_argument("--rl_problems", type=int, default=500)
     parser.add_argument("--gradient_checkpointing", type=lambda x: x.lower() != "false", default=True)
     parser.add_argument("--device", type=str, default="cpu")
+    parser.add_argument("--batch_size", type=int, default=1)
     args = parser.parse_args()
     train(
         model_name=args.model_name,
@@ -228,4 +230,5 @@ if __name__ == "__main__":
         rl_problems=args.rl_problems,
         gradient_checkpointing=args.gradient_checkpointing,
         device=args.device,
+        batch_size=args.batch_size,
     )
