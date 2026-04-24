@@ -29,5 +29,5 @@ python train.py \
     --device cuda \
     --gradient_checkpointing False \
     --sft_samples 1000 \
-    --batch_size 8
+    --batch_size 4
 echo "Done!"

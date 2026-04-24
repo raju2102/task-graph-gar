@@ -35,7 +35,9 @@ def sft_collate(batch: List[str], tokenizer, max_length: int) -> dict:
         truncation=True,
         max_length=max_length,
     )
-    encodings["labels"] = encodings["input_ids"].clone()
+    labels = encodings["input_ids"].clone()
+    labels[labels == tokenizer.pad_token_id] = -100
+    encodings["labels"] = labels
     return encodings
 
 
@@ -64,7 +66,7 @@ def run_sft(
     max_samples: int = 1000,
     epochs: int = 10,
     batch_size: int = 1,
-    lr: float = 2e-5,
+    lr: float = 1e-5,
     max_length: int = 512,
     parse_rate_threshold: float = 0.90,
     validity_rate_threshold: float = 0.90,
