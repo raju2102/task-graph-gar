@@ -17,6 +17,7 @@ source /scratch/user/$USER/venv_dl/bin/activate
 
 export HF_HOME=/scratch/user/$USER/.cache/huggingface
 export TRANSFORMERS_CACHE=$HF_HOME
+export PYTHONUNBUFFERED=1
 
 mkdir -p logs
 
