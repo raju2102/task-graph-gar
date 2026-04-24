@@ -66,7 +66,7 @@ def run_sft(
     max_samples: int = 1000,
     epochs: int = 10,
     batch_size: int = 1,
-    lr: float = 1e-5,
+    lr: float = 2e-6,
     max_length: int = 512,
     parse_rate_threshold: float = 0.90,
     validity_rate_threshold: float = 0.90,
@@ -97,7 +97,11 @@ def run_sft(
                 optimizer.zero_grad()
                 continue
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(planner.model.parameters(), 1.0)
+            grad_norm = torch.nn.utils.clip_grad_norm_(planner.model.parameters(), 0.3)
+            if torch.isnan(grad_norm):
+                print(f"  [SFT] NaN gradients at Epoch {epoch+1}, Step {step} — skipping update.")
+                optimizer.zero_grad()
+                continue
             optimizer.step()
             scheduler.step()
             optimizer.zero_grad()
