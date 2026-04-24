@@ -45,13 +45,14 @@ def inspect_prompt(n: int = 1):
         print(f"\nExpected target (DAG JSON):\n{graph.to_json()}")
 
 
-def inspect_model_output(n: int = 2):
+def inspect_model_output(n: int = 2, model_path: str = None):
     print(f"\n{DIVIDER}")
-    print("SECTION 3: RAW MODEL OUTPUT (before parsing)")
+    label = f"SECTION 3: MODEL OUTPUT ({'trained: ' + model_path if model_path else 'untrained base model'})"
+    print(label)
     print(DIVIDER)
 
     data = load_gsm8k_sft_data(max_samples=n)
-    planner = Planner()
+    planner = Planner.load(model_path) if model_path else Planner()
     planner.model.eval()
 
     for i, (problem, expected_graph) in enumerate(data):
@@ -87,6 +88,12 @@ def inspect_model_output(n: int = 2):
 
 
 if __name__ == "__main__":
-    inspect_data(n=2)
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model_path", type=str, default=None, help="Path to trained model. If not set, loads base pretrained model.")
+    parser.add_argument("--n", type=int, default=2)
+    args = parser.parse_args()
+
+    inspect_data(n=args.n)
     inspect_prompt(n=1)
-    inspect_model_output(n=2)
+    inspect_model_output(n=args.n, model_path=args.model_path)
