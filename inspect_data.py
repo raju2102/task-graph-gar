@@ -87,13 +87,53 @@ def inspect_model_output(n: int = 2, model_path: str = None):
         print(f"\nExpected graph:\n{expected_graph.to_json()}")
 
 
+def inspect_custom_problem(problem: str, model_path: str = None):
+    print(f"\n{DIVIDER}")
+    label = f"CUSTOM PROBLEM ({'trained: ' + model_path if model_path else 'untrained base model'})"
+    print(label)
+    print(DIVIDER)
+
+    planner = Planner.load(model_path) if model_path else Planner()
+    planner.model.eval()
+
+    print(f"\nProblem: {problem}")
+    prompt = planner.build_prompt(problem)
+    inputs = planner.tokenizer(prompt, return_tensors="pt").to(planner.device)
+
+    with torch.no_grad():
+        output_ids = planner.model.generate(
+            **inputs,
+            max_new_tokens=512,
+            do_sample=False,
+            pad_token_id=planner.tokenizer.eos_token_id,
+        )
+    generated = output_ids[0][inputs["input_ids"].shape[1]:]
+    raw_text = planner.tokenizer.decode(generated, skip_special_tokens=True)
+
+    print(f"\nRaw model output:\n{raw_text}")
+
+    print(f"\nParsing attempt:")
+    try:
+        graph = planner._parse_output(raw_text)
+        print(f"  Parse succeeded")
+        print(f"  Valid DAG: {graph.is_valid()}")
+        print(f"  Nodes: {len(graph.nodes)}, Edges: {len(graph.edges)}")
+        print(f"  Generated graph:\n{graph.to_json()}")
+    except Exception as e:
+        print(f"  Parse FAILED: {e}")
+
+
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_path", type=str, default=None, help="Path to trained model. If not set, loads base pretrained model.")
     parser.add_argument("--n", type=int, default=2)
+    parser.add_argument("--problem", type=str, default=None, help="Custom problem text. If set, only runs the model on this problem.")
     args = parser.parse_args()
 
-    inspect_data(n=args.n)
-    inspect_prompt(n=1)
-    inspect_model_output(n=args.n, model_path=args.model_path)
+    if args.problem:
+        inspect_custom_problem(args.problem, model_path=args.model_path)
+    else:
+        inspect_data(n=args.n)
+        inspect_prompt(n=1)
+        inspect_model_output(n=args.n, model_path=args.model_path)
