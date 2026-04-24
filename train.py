@@ -36,7 +36,7 @@ def sft_collate(batch: List[str], tokenizer, max_length: int) -> dict:
         max_length=max_length,
     )
     labels = encodings["input_ids"].clone()
-    labels[labels == tokenizer.pad_token_id] = -100
+    labels[encodings["attention_mask"] == 0] = -100
     encodings["labels"] = labels
     return encodings
 
@@ -93,8 +93,9 @@ def run_sft(
             outputs = planner.model(**batch)
             loss = outputs.loss
             if torch.isnan(loss):
-                print(f"  [SFT] NaN loss detected at Epoch {epoch+1}, Step {step}. Stopping training.")
-                return
+                print(f"  [SFT] NaN loss at Epoch {epoch+1}, Step {step} — skipping batch.")
+                optimizer.zero_grad()
+                continue
             loss.backward()
             torch.nn.utils.clip_grad_norm_(planner.model.parameters(), 1.0)
             optimizer.step()
