@@ -8,6 +8,8 @@
 #SBATCH --mem=32G
 #SBATCH --output=logs/%j.log
 
+set -e
+
 ml purge
 ml GCCcore/13.3.0
 ml Python/3.12.3
@@ -18,7 +20,7 @@ export TRANSFORMERS_CACHE=$HF_HOME
 
 mkdir -p logs
 
-cd /scratch/user/$USER/PlannerCode
+cd /scratch/user/$USER/task-graph-gar
 
 echo "Starting SFT training..."
 python train.py \
