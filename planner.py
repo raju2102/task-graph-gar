@@ -37,7 +37,7 @@ def _get_device() -> str:
 
 def _get_dtype(device: str):
     if device == "cuda":
-        return torch.float16
+        return torch.bfloat16
     if device == "mps":
         return torch.bfloat16
     return torch.float32

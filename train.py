@@ -90,6 +90,9 @@ def run_sft(
             batch = {k: v.to(planner.device) for k, v in batch.items()}
             outputs = planner.model(**batch)
             loss = outputs.loss
+            if torch.isnan(loss):
+                print(f"  [SFT] NaN loss detected at Epoch {epoch+1}, Step {step}. Stopping training.")
+                return
             loss.backward()
             torch.nn.utils.clip_grad_norm_(planner.model.parameters(), 1.0)
             optimizer.step()
