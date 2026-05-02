@@ -153,11 +153,22 @@ def run_sft(
             break
 
 
+def _parallel_ratio_from_metrics(parallelism_rate: float) -> float:
+    if parallelism_rate < 0.15:
+        return 0.30
+    elif parallelism_rate < 0.30:
+        return 0.50
+    elif parallelism_rate < 0.50:
+        return 0.70
+    else:
+        return 0.85
+
+
 def run_parallel_sft(
     planner: Planner,
-    parallel_samples: int = 500,
-    linear_samples: int = 300,
-    epochs: int = 5,
+    parallel_pool_size: int = 2000,
+    linear_pool_size: int = 1000,
+    epochs: int = 10,
     batch_size: int = 1,
     lr: float = 1e-6,
     max_length: int = 512,
@@ -165,25 +176,35 @@ def run_parallel_sft(
     validity_rate_threshold: float = 0.90,
 ):
     import random
-    parallel_data = load_gsm8k_parallel_sft_data(max_samples=parallel_samples + 50)
-    train_parallel = parallel_data[:parallel_samples]
-    val_problems = [p for p, _ in parallel_data[parallel_samples:parallel_samples + 50]]
 
-    linear_data = load_gsm8k_sft_data(max_samples=linear_samples)
-    mixed_data = train_parallel + linear_data
-    random.shuffle(mixed_data)
-
-    dataset = SFTDataset(mixed_data, planner, max_length)
-    collate_fn = partial(sft_collate, tokenizer=planner.tokenizer, max_length=max_length)
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
+    parallel_data = load_gsm8k_parallel_sft_data(max_samples=parallel_pool_size + 50)
+    train_parallel_pool = parallel_data[:parallel_pool_size]
+    val_problems = [p for p, _ in parallel_data[parallel_pool_size:parallel_pool_size + 50]]
+    linear_pool = load_gsm8k_sft_data(max_samples=linear_pool_size)
 
     optimizer = AdamW(planner.model.parameters(), lr=lr)
-    total_steps = len(dataloader) * epochs
-    scheduler = get_linear_schedule_with_warmup(
-        optimizer, num_warmup_steps=total_steps // 10, num_training_steps=total_steps
-    )
+    collate_fn = partial(sft_collate, tokenizer=planner.tokenizer, max_length=max_length)
+
+    par_ratio = 0.30
+    print(f"  [PAR-SFT] Starting with parallel ratio: {par_ratio:.0%}")
 
     for epoch in range(epochs):
+        n_total = len(train_parallel_pool) + len(linear_pool)
+        n_par = int(n_total * par_ratio)
+        n_lin = n_total - n_par
+        par_sample = random.sample(train_parallel_pool, min(n_par, len(train_parallel_pool)))
+        lin_sample = random.sample(linear_pool, min(n_lin, len(linear_pool)))
+        mixed = par_sample + lin_sample
+        random.shuffle(mixed)
+
+        print(f"  [PAR-SFT] Epoch {epoch+1}: {len(par_sample)} parallel + {len(lin_sample)} linear samples")
+
+        dataset = SFTDataset(mixed, planner, max_length)
+        dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
+        scheduler = get_linear_schedule_with_warmup(
+            optimizer, num_warmup_steps=len(dataloader) // 10, num_training_steps=len(dataloader)
+        )
+
         planner.model.train()
         total_loss = 0.0
         for step, batch in enumerate(dataloader):
@@ -218,8 +239,13 @@ def run_parallel_sft(
             f"Mean R^par: {mean_rpar:.4f}"
         )
 
+        new_ratio = _parallel_ratio_from_metrics(parallelism_rate)
+        if new_ratio != par_ratio:
+            print(f"  [PAR-SFT] Adjusting parallel ratio: {par_ratio:.0%} → {new_ratio:.0%}")
+        par_ratio = new_ratio
+
         if parse_rate >= parse_rate_threshold and validity_rate >= validity_rate_threshold:
-            print(f"  [PAR-SFT] Early stopping at epoch {epoch+1}.")
+            print(f"  [PAR-SFT] Early stopping at epoch {epoch+1}: parse+validity thresholds reached.")
             break
 
 
@@ -330,8 +356,6 @@ def train(
 def train_parallel(
     checkpoint_path: str = "./planner_model",
     save_path: str = "./planner_model_v2",
-    parallel_samples: int = 500,
-    linear_samples: int = 300,
     gradient_checkpointing: bool = False,
     device: str = "cpu",
     batch_size: int = 4,
@@ -341,13 +365,8 @@ def train_parallel(
     if gradient_checkpointing:
         planner.model.gradient_checkpointing_enable()
 
-    print("\nParallel SFT: fine-tuning on mixed parallel + linear data...")
-    run_parallel_sft(
-        planner,
-        parallel_samples=parallel_samples,
-        linear_samples=linear_samples,
-        batch_size=batch_size,
-    )
+    print("\nParallel SFT: curriculum fine-tuning on mixed parallel + linear data...")
+    run_parallel_sft(planner, batch_size=batch_size)
 
     planner.save(save_path)
     print(f"\nModel saved to {save_path}")
@@ -362,8 +381,6 @@ if __name__ == "__main__":
     parser.add_argument("--checkpoint_path", type=str, default="./planner_model")
     parser.add_argument("--save_path", type=str, default="./planner_model")
     parser.add_argument("--sft_samples", type=int, default=1000)
-    parser.add_argument("--parallel_samples", type=int, default=500)
-    parser.add_argument("--linear_samples", type=int, default=300)
     parser.add_argument("--rl_problems", type=int, default=500)
     parser.add_argument("--gradient_checkpointing", type=lambda x: x.lower() != "false", default=False)
     parser.add_argument("--device", type=str, default="cpu")
@@ -374,8 +391,6 @@ if __name__ == "__main__":
         train_parallel(
             checkpoint_path=args.checkpoint_path,
             save_path=args.save_path,
-            parallel_samples=args.parallel_samples,
-            linear_samples=args.linear_samples,
             gradient_checkpointing=args.gradient_checkpointing,
             device=args.device,
             batch_size=args.batch_size,

@@ -1,7 +1,7 @@
 #!/bin/bash
 
 #SBATCH --job-name=planner-parallel-sft
-#SBATCH --time=04:00:00
+#SBATCH --time=16:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:1
@@ -28,8 +28,6 @@ python train.py \
     --mode parallel \
     --checkpoint_path ./planner_model \
     --save_path ./planner_model_v2 \
-    --parallel_samples 500 \
-    --linear_samples 300 \
     --device cuda \
     --gradient_checkpointing False \
     --batch_size 4

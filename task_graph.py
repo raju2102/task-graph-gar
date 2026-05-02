@@ -25,7 +25,15 @@ class TaskGraph:
         for u, v in self.edges:
             if u not in ids or v not in ids:
                 return False
-        return self._is_acyclic()
+        if not self._is_acyclic():
+            return False
+        out_degree = defaultdict(int)
+        for u, _ in self.edges:
+            out_degree[u] += 1
+        sinks = [n for n in self.node_ids() if out_degree[n] == 0]
+        if len(sinks) != 1:
+            return False
+        return True
 
     def _is_acyclic(self) -> bool:
         in_degree = defaultdict(int)
