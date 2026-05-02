@@ -6,7 +6,7 @@ from torch.optim import AdamW
 from torch.utils.data import DataLoader, Dataset
 from transformers import get_linear_schedule_with_warmup
 
-from data import load_gsm8k_rl_problems, load_gsm8k_sft_data
+from data import load_gsm8k_rl_problems, load_gsm8k_sft_data, load_gsm8k_parallel_sft_data
 from planner import Planner
 from rewards import planner_reward
 from task_graph import TaskGraph
@@ -59,6 +59,41 @@ def validate_sft(planner: Planner, val_problems: List[str], num_samples: int = 5
     parse_rate = parsed / len(problems)
     validity_rate = valid_dag / len(problems)
     return parse_rate, validity_rate
+
+
+def validate_parallel_sft(planner: Planner, val_problems: List[str], num_samples: int = 50) -> Tuple[float, float, float, float]:
+    problems = val_problems[:num_samples]
+    parsed = 0
+    valid_dag = 0
+    parallel_count = 0
+    rpar_total = 0.0
+
+    planner.model.eval()
+    for problem in problems:
+        try:
+            graph = planner.generate(problem, temperature=0.0)
+            parsed += 1
+            if graph.is_valid():
+                valid_dag += 1
+                node_ids = set(graph.node_ids())
+                has_dep = {v for _, v in graph.edges}
+                is_dep_of = {u for u, _ in graph.edges}
+                roots = [n for n in node_ids if n not in has_dep]
+                has_parallel = len(roots) > 1
+                if has_parallel:
+                    parallel_count += 1
+                crit = graph.critical_path_length()
+                n = len(graph.nodes)
+                rpar_total += 1.0 - crit / n
+        except Exception:
+            pass
+
+    n_valid = valid_dag if valid_dag > 0 else 1
+    parse_rate = parsed / len(problems)
+    validity_rate = valid_dag / len(problems)
+    parallelism_rate = parallel_count / len(problems)
+    mean_rpar = rpar_total / n_valid
+    return parse_rate, validity_rate, parallelism_rate, mean_rpar
 
 
 def run_sft(
@@ -115,6 +150,76 @@ def run_sft(
 
         if parse_rate >= parse_rate_threshold and validity_rate >= validity_rate_threshold:
             print(f"  [SFT] Early stopping: both thresholds reached at epoch {epoch+1}.")
+            break
+
+
+def run_parallel_sft(
+    planner: Planner,
+    parallel_samples: int = 500,
+    linear_samples: int = 300,
+    epochs: int = 5,
+    batch_size: int = 1,
+    lr: float = 1e-6,
+    max_length: int = 512,
+    parse_rate_threshold: float = 0.90,
+    validity_rate_threshold: float = 0.90,
+):
+    import random
+    parallel_data = load_gsm8k_parallel_sft_data(max_samples=parallel_samples + 50)
+    train_parallel = parallel_data[:parallel_samples]
+    val_problems = [p for p, _ in parallel_data[parallel_samples:parallel_samples + 50]]
+
+    linear_data = load_gsm8k_sft_data(max_samples=linear_samples)
+    mixed_data = train_parallel + linear_data
+    random.shuffle(mixed_data)
+
+    dataset = SFTDataset(mixed_data, planner, max_length)
+    collate_fn = partial(sft_collate, tokenizer=planner.tokenizer, max_length=max_length)
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
+
+    optimizer = AdamW(planner.model.parameters(), lr=lr)
+    total_steps = len(dataloader) * epochs
+    scheduler = get_linear_schedule_with_warmup(
+        optimizer, num_warmup_steps=total_steps // 10, num_training_steps=total_steps
+    )
+
+    for epoch in range(epochs):
+        planner.model.train()
+        total_loss = 0.0
+        for step, batch in enumerate(dataloader):
+            batch = {k: v.to(planner.device) for k, v in batch.items()}
+            outputs = planner.model(**batch)
+            loss = outputs.loss
+            if torch.isnan(loss):
+                print(f"  [PAR-SFT] NaN loss at Epoch {epoch+1}, Step {step} — skipping batch.")
+                optimizer.zero_grad()
+                continue
+            loss.backward()
+            grad_norm = torch.nn.utils.clip_grad_norm_(planner.model.parameters(), 0.3)
+            if torch.isnan(grad_norm):
+                print(f"  [PAR-SFT] NaN gradients at Epoch {epoch+1}, Step {step} — skipping update.")
+                optimizer.zero_grad()
+                continue
+            optimizer.step()
+            scheduler.step()
+            optimizer.zero_grad()
+            total_loss += loss.item()
+            if step % 50 == 0:
+                print(f"  [PAR-SFT] Epoch {epoch+1}, Step {step}, Loss: {loss.item():.4f}")
+
+        avg_loss = total_loss / len(dataloader)
+        parse_rate, validity_rate, parallelism_rate, mean_rpar = validate_parallel_sft(planner, val_problems)
+        print(
+            f"  [PAR-SFT] Epoch {epoch+1} done. "
+            f"Avg loss: {avg_loss:.4f} | "
+            f"Parse rate: {parse_rate:.2%} | "
+            f"DAG validity: {validity_rate:.2%} | "
+            f"Parallelism rate: {parallelism_rate:.2%} | "
+            f"Mean R^par: {mean_rpar:.4f}"
+        )
+
+        if parse_rate >= parse_rate_threshold and validity_rate >= validity_rate_threshold:
+            print(f"  [PAR-SFT] Early stopping at epoch {epoch+1}.")
             break
 
 
@@ -222,23 +327,66 @@ def train(
     print(f"\nModel saved to {save_path}")
 
 
+def train_parallel(
+    checkpoint_path: str = "./planner_model",
+    save_path: str = "./planner_model_v2",
+    parallel_samples: int = 500,
+    linear_samples: int = 300,
+    gradient_checkpointing: bool = False,
+    device: str = "cpu",
+    batch_size: int = 4,
+):
+    print(f"Loading checkpoint: {checkpoint_path} on {device}")
+    planner = Planner.load(checkpoint_path, device=device)
+    if gradient_checkpointing:
+        planner.model.gradient_checkpointing_enable()
+
+    print("\nParallel SFT: fine-tuning on mixed parallel + linear data...")
+    run_parallel_sft(
+        planner,
+        parallel_samples=parallel_samples,
+        linear_samples=linear_samples,
+        batch_size=batch_size,
+    )
+
+    planner.save(save_path)
+    print(f"\nModel saved to {save_path}")
+
+
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model_name", type=str, default="Qwen/Qwen2.5-0.5B-Instruct")
+    parser.add_argument("--mode", type=str, default="sft", choices=["sft", "parallel"],
+                        help="sft: initial training from base model. parallel: fine-tune from checkpoint.")
+    parser.add_argument("--model_name", type=str, default="Qwen/Qwen2.5-1.5B-Instruct")
+    parser.add_argument("--checkpoint_path", type=str, default="./planner_model")
     parser.add_argument("--save_path", type=str, default="./planner_model")
     parser.add_argument("--sft_samples", type=int, default=1000)
+    parser.add_argument("--parallel_samples", type=int, default=500)
+    parser.add_argument("--linear_samples", type=int, default=300)
     parser.add_argument("--rl_problems", type=int, default=500)
-    parser.add_argument("--gradient_checkpointing", type=lambda x: x.lower() != "false", default=True)
+    parser.add_argument("--gradient_checkpointing", type=lambda x: x.lower() != "false", default=False)
     parser.add_argument("--device", type=str, default="cpu")
     parser.add_argument("--batch_size", type=int, default=1)
     args = parser.parse_args()
-    train(
-        model_name=args.model_name,
-        save_path=args.save_path,
-        sft_samples=args.sft_samples,
-        rl_problems=args.rl_problems,
-        gradient_checkpointing=args.gradient_checkpointing,
-        device=args.device,
-        batch_size=args.batch_size,
-    )
+
+    if args.mode == "parallel":
+        train_parallel(
+            checkpoint_path=args.checkpoint_path,
+            save_path=args.save_path,
+            parallel_samples=args.parallel_samples,
+            linear_samples=args.linear_samples,
+            gradient_checkpointing=args.gradient_checkpointing,
+            device=args.device,
+            batch_size=args.batch_size,
+        )
+    else:
+        train(
+            model_name=args.model_name,
+            save_path=args.save_path,
+            sft_samples=args.sft_samples,
+            rl_problems=args.rl_problems,
+            gradient_checkpointing=args.gradient_checkpointing,
+            device=args.device,
+            batch_size=args.batch_size,
+        )
