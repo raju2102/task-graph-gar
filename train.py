@@ -289,7 +289,10 @@ def run_parallel_sft(
         #     print(f"  [PAR-SFT] Early stopping at epoch {epoch+1}: parse+validity thresholds reached.")
         #     break
 
-    _plot_parallel_sft_metrics(history)
+    try:
+        _plot_parallel_sft_metrics(history)
+    except Exception as e:
+        print(f"  [PAR-SFT] Could not generate plot: {e}")
 
 
 
