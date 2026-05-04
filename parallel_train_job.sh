@@ -27,7 +27,7 @@ echo "Starting parallel SFT fine-tuning from checkpoint..."
 python train.py \
     --mode parallel \
     --checkpoint_path ./planner_model \
-    --save_path ./planner_model_v2 \
+    --save_path ./planner_model_v3 \
     --device cuda \
     --gradient_checkpointing False \
     --batch_size 4

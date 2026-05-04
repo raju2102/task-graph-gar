@@ -164,6 +164,38 @@ def _parallel_ratio_from_metrics(parallelism_rate: float) -> float:
         return 0.85
 
 
+def _plot_parallel_sft_metrics(history: dict, save_path: str = "parallel_sft_metrics.png"):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    epochs = history["epoch"]
+    fig, axes = plt.subplots(2, 2, figsize=(10, 7))
+    fig.suptitle("Parallel SFT Training Metrics", fontsize=13)
+
+    axes[0, 0].plot(epochs, history["avg_loss"], marker="o")
+    axes[0, 0].set_title("Avg Loss")
+    axes[0, 0].set_xlabel("Epoch")
+
+    axes[0, 1].plot(epochs, [r * 100 for r in history["parse_rate"]], marker="o", label="Parse rate")
+    axes[0, 1].plot(epochs, [r * 100 for r in history["validity_rate"]], marker="s", label="DAG validity")
+    axes[0, 1].set_title("Parse Rate & DAG Validity (%)")
+    axes[0, 1].set_xlabel("Epoch")
+    axes[0, 1].legend()
+
+    axes[1, 0].plot(epochs, [r * 100 for r in history["parallelism_rate"]], marker="o", color="tab:orange")
+    axes[1, 0].set_title("Parallelism Rate (%)")
+    axes[1, 0].set_xlabel("Epoch")
+
+    axes[1, 1].plot(epochs, history["mean_rpar"], marker="o", color="tab:green")
+    axes[1, 1].set_title("Mean R^par")
+    axes[1, 1].set_xlabel("Epoch")
+
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150)
+    print(f"  [PAR-SFT] Metrics plot saved to {save_path}")
+
+
 def run_parallel_sft(
     planner: Planner,
     parallel_pool_size: int = 2000,
@@ -172,8 +204,8 @@ def run_parallel_sft(
     batch_size: int = 1,
     lr: float = 1e-6,
     max_length: int = 512,
-    parse_rate_threshold: float = 0.90,
-    validity_rate_threshold: float = 0.90,
+    # parse_rate_threshold: float = 0.90,
+    # validity_rate_threshold: float = 0.90,
 ):
     import random
 
@@ -187,6 +219,8 @@ def run_parallel_sft(
 
     par_ratio = 0.30
     print(f"  [PAR-SFT] Starting with parallel ratio: {par_ratio:.0%}")
+
+    history = {"epoch": [], "avg_loss": [], "parse_rate": [], "validity_rate": [], "parallelism_rate": [], "mean_rpar": []}
 
     for epoch in range(epochs):
         n_total = len(train_parallel_pool) + len(linear_pool)
@@ -239,14 +273,24 @@ def run_parallel_sft(
             f"Mean R^par: {mean_rpar:.4f}"
         )
 
+        history["epoch"].append(epoch + 1)
+        history["avg_loss"].append(avg_loss)
+        history["parse_rate"].append(parse_rate)
+        history["validity_rate"].append(validity_rate)
+        history["parallelism_rate"].append(parallelism_rate)
+        history["mean_rpar"].append(mean_rpar)
+
         new_ratio = _parallel_ratio_from_metrics(parallelism_rate)
         if new_ratio != par_ratio:
             print(f"  [PAR-SFT] Adjusting parallel ratio: {par_ratio:.0%} → {new_ratio:.0%}")
         par_ratio = new_ratio
 
-        if parse_rate >= parse_rate_threshold and validity_rate >= validity_rate_threshold:
-            print(f"  [PAR-SFT] Early stopping at epoch {epoch+1}: parse+validity thresholds reached.")
-            break
+        # if parse_rate >= parse_rate_threshold and validity_rate >= validity_rate_threshold:
+        #     print(f"  [PAR-SFT] Early stopping at epoch {epoch+1}: parse+validity thresholds reached.")
+        #     break
+
+    _plot_parallel_sft_metrics(history)
+
 
 
 def compute_grpo_loss(
@@ -355,7 +399,7 @@ def train(
 
 def train_parallel(
     checkpoint_path: str = "./planner_model",
-    save_path: str = "./planner_model_v2",
+    save_path: str = "./planner_model_v3",
     gradient_checkpointing: bool = False,
     device: str = "cpu",
     batch_size: int = 4,
